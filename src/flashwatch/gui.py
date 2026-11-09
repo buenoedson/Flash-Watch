@@ -18,13 +18,15 @@ RED = "#c5221f"
 UI_BATCH = 500
 
 WIN_COLS = [
-    ("hora", "Hora", 95), ("vis", "Visível (ms)", 90), ("life", "Vida Total (ms)", 100), ("fim", "Fim", 70),
-    ("exe", "Executável", 140), ("pid", "PID", 65), ("cmd", "Comando / Processo Real", 380),
-    ("parent", "Processo Pai", 130), ("title", "Título da Janela", 200), ("shot", "Print", 110),
+    ("hora", "Hora", 90), ("vis", "Visível (ms)", 85), ("life", "Vida Total (ms)", 95), ("fim", "Fim", 65),
+    ("exe", "Executável", 130), ("pid", "PID", 60), ("trust", "Confiabilidade", 165),
+    ("cmd", "Comando / Processo Real", 340), ("parent", "Processo Pai", 120),
+    ("title", "Título da Janela", 180), ("shot", "Print", 105),
 ]
 PROC_COLS = [
-    ("hora", "Hora", 95), ("dur", "Duração (ms)", 95), ("pid", "PID", 65), ("ppid", "PPID", 65),
-    ("image", "Imagem", 140), ("cmd", "Linha de Comando", 520), ("win", "Teve Janela?", 90),
+    ("hora", "Hora", 90), ("dur", "Duração (ms)", 90), ("pid", "PID", 60), ("ppid", "PPID", 60),
+    ("image", "Imagem", 130), ("trust", "Confiabilidade", 165), ("cmd", "Linha de Comando", 460),
+    ("win", "Teve Janela?", 85),
 ]
 
 
@@ -94,9 +96,12 @@ class FlashWatchApp:
 
         self.var_fast = tk.BooleanVar(value=False)
         self.var_noise = tk.BooleanVar(value=True)
+        self.var_untrusted = tk.BooleanVar(value=False)
         ttk.Checkbutton(top, text="Apenas Rápidas (<= Limite)", variable=self.var_fast,
                         command=self._rebuild_windows).pack(side="left", padx=4)
         ttk.Checkbutton(top, text="Ocultar Ruído (Tooltips/IME/Cloaked)", variable=self.var_noise,
+                        command=self._rebuild_windows).pack(side="left", padx=4)
+        ttk.Checkbutton(top, text="Apenas Alertas/Não Confiáveis", variable=self.var_untrusted,
                         command=self._rebuild_windows).pack(side="left", padx=4)
 
         ttk.Button(top, text="⚡ Autoteste (S4)", command=self._autotest).pack(side="right", padx=2)
@@ -135,6 +140,7 @@ class FlashWatchApp:
         self.tree_w.bind("<<TreeviewSelect>>", lambda e: self._on_select_window())
         self.tree_p.bind("<<TreeviewSelect>>", lambda e: self._on_select_process())
         self.tree_w.tag_configure("fast", background="#fff4d6")
+        self.tree_w.tag_configure("suspicious", background="#fde7e9", foreground="#a80000")
         self.tree_w.tag_configure("noise", foreground="#999")
 
         bottom = ttk.PanedWindow(paned, orient="horizontal")
@@ -251,6 +257,10 @@ class FlashWatchApp:
             return False
         if self.var_fast.get() and not self._is_fast(row):
             return False
+        if self.var_untrusted.get():
+            verdict = ((row.get("trust") or {}).get("verdict") or "")
+            if verdict in ("confiavel_microsoft", "confiavel_assinado"):
+                return False
         return True
 
     def _values(self, row: dict) -> tuple:
@@ -260,13 +270,17 @@ class FlashWatchApp:
             st = f"{st} ({shot['latency_ms']:.0f} ms)"
         ended = row.get("ended")
         fim = "aberta" if ended is None else ("fechada" if ended else "ao parar")
+        trust_label = row.get("trust_label") or ((row.get("trust") or {}).get("label") or "")
         return (row.get("hora", ""), _fmt(row.get("first_visible_ms")), _fmt(row.get("lifetime_ms")), fim,
-                os.path.basename(row.get("exe") or ""), row.get("pid", ""), row.get("real_command", ""),
-                row.get("parent", ""), row.get("title", ""), st)
+                os.path.basename(row.get("exe") or ""), row.get("pid", ""), trust_label,
+                row.get("real_command", ""), row.get("parent", ""), row.get("title", ""), st)
 
     def _tags(self, row: dict) -> tuple:
         tags = []
-        if self._is_fast(row):
+        verdict = ((row.get("trust") or {}).get("verdict") or "")
+        if verdict in ("suspeito", "nao_assinado"):
+            tags.append("suspicious")
+        elif self._is_fast(row):
             tags.append("fast")
         if row.get("noise"):
             tags.append("noise")
@@ -304,8 +318,9 @@ class FlashWatchApp:
     def _upsert_proc(self, row: dict) -> None:
         key = row["instance_key"]
         self.proc_rows[key] = row
+        trust_label = ((row.get("trust") or {}).get("label") or "")
         vals = (row.get("hora", ""), _fmt(row.get("lifetime_ms")), row.get("pid", ""), row.get("ppid", ""),
-                row.get("image") or os.path.basename(row.get("exe") or ""), row.get("cmdline", ""),
+                row.get("image") or os.path.basename(row.get("exe") or ""), trust_label, row.get("cmdline", ""),
                 "sim" if row.get("had_window") else "não")
         if self.tree_p.exists(key):
             self.tree_p.item(key, values=vals)
@@ -330,11 +345,17 @@ class FlashWatchApp:
         corr = d.get("correlation") or {}
         nat = d.get("native_proc") or {}
         shot = d.get("shot") or {}
+        trust = corr.get("trust") or row.get("trust") or {}
+        reasons = "; ".join(trust.get("reasons") or [])
         lines = [
             f"wid: {d.get('wid')}   hwnd: {d.get('hwnd')}   pid: {d.get('pid')}   classe: {d.get('class_name')}",
             f"Caminho: {corr.get('exe') or nat.get('exe', '')}",
             f"Linha de comando: {corr.get('cmdline', '')}",
             f"Comando real: {corr.get('real_command', '')}",
+            f"Confiabilidade: {trust.get('label', '—')} | assinado={trust.get('signed')} "
+            f"(fonte={trust.get('signature_source', 'none')}, signatário='{trust.get('signer', '')}', "
+            f"status={trust.get('status_hex', '')})",
+            f"SHA-256: {trust.get('sha256', '')} | motivos: {reasons}",
             f"Pai: {corr.get('parent_image', '')} (pid {corr.get('parent_pid')})  {corr.get('parent_cmdline', '')}",
             f"Avô: {corr.get('grandparent_image', '')}  {corr.get('grandparent_cmdline', '')}",
             f"Correlação: método={corr.get('method')} ambíguo={corr.get('ambiguous')} pendente={corr.get('pending')} "

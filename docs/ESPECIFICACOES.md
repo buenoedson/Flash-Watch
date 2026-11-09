@@ -149,7 +149,7 @@ Cada linha do `eventos.jsonl` é um objeto JSON com `schema_version`, `type`, `t
 * `window_hide`: `wid`, `visible_interval_ms`.
 * `window_destroy`: `wid`, `first_visible_ms`, `visible_total_ms`, `lifetime_ms`, `is_fast`.
 * `window_title`: `wid`, `new_title`.
-* `correlation`: `wid`, `instance_key`, `method` (`etw`, `snapshot`, `psutil_live`, `native_only`, `nenhum`), `ambiguous` (`bool`), `exe`, `cmdline`, `parent_pid`, `parent_image`, `parent_cmdline`, `real_command`, `console_chain` (lista de `{"role": str, "pid": int, "image": str, "cmdline": str}`).
+* `correlation`: `wid`, `instance_key`, `method` (`etw`, `snapshot`, `psutil_live`, `native_only`, `nenhum`), `ambiguous` (`bool`), `exe`, `cmdline`, `parent_pid`, `parent_image`, `parent_cmdline`, `real_command`, `console_chain` (lista de `{"role": str, "pid": int, "image": str, "cmdline": str}`), `trust` (`{"verdict": str, "label": str, "signed": bool, "signature_source": str, "signer": str, "sha256": str, "location": str, "reasons": list[str]}`).
 * `erro`: `where`, `win32_code`, `message`, `wid`, `pid`.
 * `session_stop`: `total_events`, `fast_windows`, `short_processes`, `shots_saved`, `errors_count`.
 

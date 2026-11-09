@@ -105,6 +105,35 @@ def test_capture_service_thread_mode(tmp_path: Path):
         svc.stop()
 
 
+def test_capture_service_refresh_updates_painted_frame(tmp_path: Path):
+    """Garante que o refresh pós-WM_PAINT/NAMECHANGE atualiza o buffer sem perder o de t=0 se fechar antes."""
+    frames = [
+        (b"\x00\x00\x00\xff" * (10 * 10), 10, 10),  # t=0 ms: fundo antes da animação DWM
+        (b"\xff\xff\xff\xff" * (10 * 10), 10, 10),  # t=45 ms / NAMECHANGE: janela já pintada
+    ]
+    idx = {"i": 0}
+
+    def grabber(reg):
+        val = frames[min(idx["i"], len(frames) - 1)]
+        idx["i"] += 1
+        return val
+
+    svc = cap.CaptureService(tmp_path / "shots", mode="callback", grabber=grabber, followup_delay_ms=10.0)
+    svc.start()
+    try:
+        t0 = time.perf_counter_ns()
+        sh = svc.on_show("w_000020", 0, [0, 0, 10, 10], False, t0)
+        assert sh["status"] == cap.ST_IN_RAM
+        assert svc.refresh_if_visible("w_000020") is False  # hwnd=0 não agenda refresh automático
+        # Força um refresh com hwnd simulado no buffer
+        svc._buffers["w_000020"].hwnd = 0
+        svc._refresh_buffer("w_000020", 0, {"left": 0, "top": 0, "width": 10, "height": 10}, 0)
+        fin = svc.finalize("w_000020", is_fast=True)
+        assert fin is not None and fin["status"] == cap.ST_OK and fin["refreshed"] is True
+    finally:
+        svc.stop()
+
+
 # ----------------------------------------------------------------------------- T-08 & T-09: Storage, CSV UTF-8-SIG e HTML
 def test_storage_and_html_export(tmp_path: Path):
     sdir = tmp_path / "20261108_120000"
@@ -185,3 +214,77 @@ def test_storage_and_html_export(tmp_path: Path):
     assert "<script>alert(1)</script>" not in html
     assert "\\u003cscript\\u003ealert(1)\\u003c/script\\u003e" in html
     assert "shots/w_000001.png" in html
+
+
+# ----------------------------------------------------------------------------- T-05 (Real WinEventHook) & T-10 (Engine + GUI)
+import pytest  # noqa: E402
+from flashwatch import win32_api as w  # noqa: E402
+from flashwatch.window_monitor import WindowMonitor  # noqa: E402
+
+
+@pytest.mark.win
+def test_window_monitor_live_cycles_50ms_and_200ms():
+    """T-05 CA: Detecta janelas efêmeras de 50 ms e 200 ms e suporta múltiplos ciclos Iniciar/Parar."""
+    import subprocess
+    import sys
+
+    w.set_dpi_awareness()
+    for cycle, target_ms in enumerate((50, 200), start=1):
+        captured = []
+        errs = []
+        mon = WindowMonitor(
+            emit=captured.append,
+            on_error=lambda *a: errs.append(a),
+            start_seq=(cycle - 1) * 100,
+        )
+        assert mon.start_and_wait(timeout=5.0)
+        try:
+            from flashwatch.engine import self_command
+            title = f"FW_T05_{target_ms}MS_C{cycle}"
+            subprocess.run(
+                self_command() + ["--flash-window", str(target_ms), "--title", title, "--rename-to", title + "_REN"],
+                timeout=10,
+                check=True,
+            )
+            time.sleep(0.15)
+        finally:
+            mon.stop(timeout=5.0)
+        assert not mon.is_alive()
+        shows = [e for e in captured if e["type"] == "window_show" and not e.get("reshow") and title in e.get("title", "")]
+        assert shows, f"Janela {title} não detectada no ciclo {cycle}"
+        wid = shows[0]["wid"]
+        destroys = [e for e in captured if e["type"] == "window_destroy" and e["wid"] == wid]
+        assert destroys
+        d = destroys[0]
+        assert d["first_visible_ms"] is not None and d["first_visible_ms"] >= target_ms * 0.5
+        assert title + "_REN" in d["title_history"]
+
+
+@pytest.mark.win
+def test_engine_and_gui_lifecycle(tmp_path: Path):
+    """T-10 CA: Engine + GUI iniciam, monitoram, processam fila sem travar e exportam ao parar."""
+    import tkinter as tk
+    from flashwatch.config import Config
+    from flashwatch.gui import FlashWatchApp
+
+    cfg = Config(limite_s=5.0, output_dir=tmp_path / "sessoes")
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        app = FlashWatchApp(root, cfg)
+        sdir = app.engine.start()
+        app.poll_ui_queue()
+        assert app.engine.state == "running"
+        app.engine.pause()
+        assert app.engine.state == "paused"
+        app.engine.resume()
+        assert app.engine.state == "running"
+        info = app.engine.stop(export=True)
+        app.poll_ui_queue()
+        assert app.engine.state == "idle"
+        assert (sdir / "eventos.jsonl").exists()
+        assert (sdir / "relatorio.html").exists()
+        assert info.get("html")
+    finally:
+        root.destroy()
+

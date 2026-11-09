@@ -40,6 +40,8 @@ class ShotBuffer:
     latency_ms: float
     method: str
     visible_after: bool
+    rect: list[int] | None = None
+    refreshed: bool = False
 
 
 def _new_mss():
@@ -59,7 +61,8 @@ class CaptureService:
     def __init__(self, shots_dir: Path, mode: str = "callback", max_px_callback: int = 1920 * 1080,
                  min_side: int = 4, on_error: Callable[[str, str, int, str | None], None] | None = None,
                  on_result: Callable[[str, dict], None] | None = None,
-                 grabber: Callable[[dict], tuple[bytes, int, int]] | None = None):
+                 grabber: Callable[[dict], tuple[bytes, int, int]] | None = None,
+                 followup_delay_ms: float = 45.0):
         self.shots_dir = Path(shots_dir)
         self.mode = mode
         self.max_px_callback = max_px_callback
@@ -67,6 +70,7 @@ class CaptureService:
         self.on_error = on_error
         self.on_result = on_result
         self._grabber = grabber
+        self.followup_delay_ms = followup_delay_ms
         self._buffers: dict[str, ShotBuffer] = {}
         self._pending_decision: dict[str, bool] = {}   # modo thread: finalize chegou antes do grab
         self._finished: set[str] = set()
@@ -134,11 +138,16 @@ class CaptureService:
             return {"status": ST_TOO_SMALL, "method": "", "latency_ms": None, "path": ""}
         region = {"left": left, "top": top, "width": width, "height": height}
         if self.mode == "callback" and width * height <= self.max_px_callback:
-            return self._grab_now(wid, hwnd, region, show_ns, M_CALLBACK)
-        self._q.put((wid, hwnd, region, show_ns))
+            res = self._grab_now(wid, hwnd, region, show_ns, M_CALLBACK, rect=rect)
+            if res["status"] == ST_IN_RAM and hwnd and self.followup_delay_ms > 0:
+                due_ns = time.perf_counter_ns() + int(self.followup_delay_ms * 1_000_000)
+                self._q.put(("refresh", wid, hwnd, region, show_ns, due_ns))
+            return res
+        self._q.put(("grab", wid, hwnd, region, show_ns, rect))
         return {"status": ST_QUEUED, "method": M_THREAD, "latency_ms": None, "path": ""}
 
-    def _grab_now(self, wid: str, hwnd: int, region: dict, show_ns: int, method: str) -> dict:
+    def _grab_now(self, wid: str, hwnd: int, region: dict, show_ns: int, method: str,
+                  rect: list[int] | None = None) -> dict:
         try:
             bgra, width, height = self._grab_pixels(region)
         except Exception as exc:  # noqa: BLE001 - falha de print nunca descarta o registro (RF-11)
@@ -148,20 +157,70 @@ class CaptureService:
                     "message": str(exc)[:300]}
         latency = (time.perf_counter_ns() - show_ns) / 1e6
         visible_after = bool(w.is_window_visible(hwnd)) if (w.IS_WINDOWS and hwnd) else True
-        buf = ShotBuffer(wid, hwnd, bgra, width, height, show_ns, round(latency, 3), method, visible_after)
+        buf = ShotBuffer(wid, hwnd, bgra, width, height, show_ns, round(latency, 3), method, visible_after, rect=rect)
         with self._lock:
             self._buffers[wid] = buf
         self.stats["captured"] += 1
         return {"status": ST_IN_RAM, "method": method, "latency_ms": buf.latency_ms, "path": "",
                 "visible_after_grab": visible_after}
 
+    def refresh_if_visible(self, wid: str) -> bool:
+        """Atualiza o buffer em RAM se a janela ainda estiver visível e não cloaked (ex.: em NAMECHANGE)."""
+        with self._lock:
+            buf = self._buffers.get(wid)
+            if buf is None or wid in self._finished:
+                return False
+            hwnd = buf.hwnd
+            show_ns = buf.show_ns
+            rect = buf.rect
+        if not hwnd:
+            return False
+        left, top, right, bottom = rect or [0, 0, buf.width, buf.height]
+        region = {"left": left, "top": top, "width": max(1, right - left), "height": max(1, bottom - top)}
+        self._q.put(("refresh", wid, hwnd, region, show_ns, 0))
+        return True
+
+    def _refresh_buffer(self, wid: str, hwnd: int, fallback_region: dict, due_ns: int) -> None:
+        now = time.perf_counter_ns()
+        if due_ns > now:
+            time.sleep(min(0.15, (due_ns - now) / 1e9))
+        with self._lock:
+            buf = self._buffers.get(wid)
+            if buf is None or wid in self._finished:
+                return
+        if w.IS_WINDOWS and hwnd:
+            if not w.is_window_visible(hwnd) or w.is_cloaked(hwnd):
+                return
+            rect, _ = w.get_window_rect(hwnd)
+            l, t, r, b = rect
+            if r - l >= self.min_side and b - t >= self.min_side:
+                fallback_region = {"left": l, "top": t, "width": r - l, "height": b - t}
+        try:
+            bgra, width, height = self._grab_pixels(fallback_region)
+        except Exception:  # noqa: BLE001 - preserva o buffer original de t=0 ms se o refresh falhar
+            return
+        if w.IS_WINDOWS and hwnd and (not w.is_window_visible(hwnd) or w.is_cloaked(hwnd)):
+            return
+        with self._lock:
+            cur = self._buffers.get(wid)
+            if cur is not None and wid not in self._finished:
+                cur.bgra = bgra
+                cur.width = width
+                cur.height = height
+                cur.refreshed = True
+
     def _thread_loop(self) -> None:
         while True:
             item = self._q.get()
             if item is None:
                 break
-            wid, hwnd, region, show_ns = item
-            shot = self._grab_now(wid, hwnd, region, show_ns, M_THREAD)
+            kind = item[0]
+            if kind == "refresh":
+                _, wid, hwnd, region, _show_ns, due_ns = item
+                self._refresh_buffer(wid, hwnd, region, due_ns)
+                continue
+            _, wid, hwnd, region, show_ns, rect = item
+            shot = self._grab_now(wid, hwnd, region, show_ns, M_THREAD, rect=rect)
             with self._lock:
                 decision = self._pending_decision.pop(wid, None)
             if shot["status"] != ST_IN_RAM:
@@ -173,6 +232,9 @@ class CaptureService:
                 final = self.finalize(wid, decision)
                 if final is not None:
                     self._emit_result(wid, final)
+            elif hwnd and self.followup_delay_ms > 0:
+                due_ns = time.perf_counter_ns() + int(self.followup_delay_ms * 1_000_000)
+                self._q.put(("refresh", wid, hwnd, region, show_ns, due_ns))
 
     # ------------------------------------------------------------------ decisão (thread Worker)
     def finalize(self, wid: str, is_fast: bool) -> dict | None:
@@ -188,7 +250,7 @@ class CaptureService:
                 return None
             self._finished.add(wid)
         base = {"method": buf.method, "latency_ms": buf.latency_ms, "visible_after_grab": buf.visible_after,
-                "width": buf.width, "height": buf.height}
+                "width": buf.width, "height": buf.height, "refreshed": buf.refreshed}
         if not is_fast:
             self.stats["discarded"] += 1
             return {**base, "status": ST_DISCARDED, "path": ""}

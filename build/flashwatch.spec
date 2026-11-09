@@ -21,6 +21,7 @@ a = Analysis(
         "PIL.ImageTk",
         "tkinter",
         "tkinter.ttk",
+        "flashwatch.trust",
     ],
     hookspath=[],
     hooksconfig={},
@@ -63,3 +64,4 @@ coll = COLLECT(
     upx_exclude=[],
     name="FlashWatch",
 )
+

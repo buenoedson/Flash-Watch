@@ -56,6 +56,7 @@ details{margin-top:4px}details pre{white-space:pre-wrap;word-break:break-all;bac
   <label><input type="radio" name="scope" value="fast" checked> Apenas Rápidas</label>
   <label><input type="radio" name="scope" value="all"> Todas</label>
   <label><input type="checkbox" id="hideNoise" checked> Ocultar ruído</label>
+  <label><input type="checkbox" id="onlyAlerts"> Apenas Alertas/Não Confiáveis</label>
   <label>Métrica: <select id="metric"><option value="visible">Visível (SHOW→HIDE)</option><option value="lifetime">Vida Total (SHOW→DESTROY)</option></select></label>
 </section>
 <nav class="tabs">
@@ -82,7 +83,7 @@ const el = (tag, attrs, ...kids) => { const e = document.createElement(tag);
 const fmt = v => (v === null || v === undefined) ? "" : (typeof v === "number" ? v.toLocaleString("pt-BR", {maximumFractionDigits: 1}) : String(v));
 const base = s => (s || "").split(/[\\/]/).pop();
 const limitMs = (D.limite_s || 5) * 1000;
-const st = {q: "", max: limitMs, scope: "fast", hideNoise: true, metric: D.metric || "visible", sortW: null, sortP: null};
+const st = {q: "", max: limitMs, scope: "fast", hideNoise: true, onlyAlerts: false, metric: D.metric || "visible", sortW: null, sortP: null};
 
 const ss = D.session || {};
 $("#meta").textContent = `Sessão iniciada ${ss.t_ft ? new Date((ss.t_ft/1e4) - 11644473600000).toLocaleString("pt-BR") : "?"} · Windows build ${ss.windows_build || "?"} · ${ss.is_admin ? "Administrador (ETW)" : "MODO LIMITADO (sem admin)"} · limite ${D.limite_s}s`;
@@ -107,10 +108,18 @@ function shotCell(w){
   return td;
 }
 
+function trustBadge(t){
+  const v = (t || {}).verdict || "";
+  const cls = (v === "confiavel_microsoft" || v === "confiavel_assinado") ? "ok" : (v === "suspeito" || v === "nao_assinado" ? "bad" : "warn");
+  return el("span", {class: "pill " + cls, title: ((t || {}).reasons || []).join(" | "), text: (t || {}).label || "—"});
+}
+
 function detail(w){
-  const c = corr(w); const lines = [
+  const c = corr(w); const t = c.trust || {}; const lines = [
     `wid: ${w.wid}  hwnd: ${w.hwnd}  pid: ${w.pid}  classe: ${w.class_name}`,
     `Executável: ${w.exe || ""}`, `Linha de comando: ${c.cmdline || ""}`, `Comando real: ${c.real_command || ""}`,
+    `Confiabilidade: ${t.label || "—"} | assinado=${t.signed} (${t.signature_source || "none"}, '${t.signer || ""}') | SHA-256=${t.sha256 || ""}`,
+    `Motivos: ${(t.reasons || []).join(" | ")}`,
     `Pai: ${c.parent_image || ""} (${c.parent_pid ?? ""}) ${c.parent_cmdline || ""}`,
     `Avô: ${c.grandparent_image || ""} ${c.grandparent_cmdline || ""}`,
     `Correlação: ${c.method || ""} ambíguo=${c.ambiguous} pendente=${c.pending} erro=${c.error || ""}`,
@@ -131,10 +140,11 @@ function renderWindows(){
   let rows = (D.windows || []).filter(w => {
     if (st.hideNoise && w.noise) return false;
     if (st.scope === "fast" && !isFast(w)) return false;
+    if (st.onlyAlerts) { const vd = (corr(w).trust || {}).verdict || ""; if (vd === "confiavel_microsoft" || vd === "confiavel_assinado") return false; }
     const m = metricVal(w); if (st.max > 0 && m !== null && m !== undefined && m > st.max && st.scope === "fast") return false;
     if (st.q && !hay(w).includes(st.q)) return false; return true; });
   const cols = [["Hora", w => w.t_ft], ["Visível (ms)", w => w.first_visible_ms ?? 1e12], ["Vida Total (ms)", w => w.lifetime_ms ?? 1e12], ["Fim", null],
-    ["Executável", w => base(w.exe)], ["PID", w => w.pid], ["Comando / Processo Real", w => corr(w).real_command || ""], ["Processo Pai", w => corr(w).parent_image || ""],
+    ["Executável", w => base(w.exe)], ["PID", w => w.pid], ["Confiabilidade", w => (corr(w).trust || {}).label || ""], ["Comando / Processo Real", w => corr(w).real_command || ""], ["Processo Pai", w => corr(w).parent_image || ""],
     ["Título da Janela", w => w.title || ""], ["Print", null]];
   rows = sortBy(rows, st.sortW);
   if (!rows.length) { v.append(el("div", {class: "empty", text: "Nenhuma janela para os filtros atuais."})); return; }
@@ -145,6 +155,7 @@ function renderWindows(){
       el("td", {text: w.hora}), el("td", {text: fmt(w.first_visible_ms)}), el("td", {text: fmt(w.lifetime_ms)}),
       el("td", null, el("span", {class: "pill " + (w.ended === false ? "warn" : "ok"), text: w.ended === false ? "aberta" : "fechada"})),
       el("td", {text: base(w.exe), title: w.exe || ""}), el("td", {text: fmt(w.pid)}),
+      el("td", null, trustBadge(c.trust)),
       el("td", {class: "cmd"}, el("div", {text: c.real_command || c.cmdline || ""}), detail(w)),
       el("td", {text: c.parent_image || "", title: c.parent_cmdline || ""}), el("td", {text: w.title || ""}), shotCell(w));
     tb.append(tr);
@@ -154,14 +165,15 @@ function renderWindows(){
 
 function renderProcs(){
   const v = $("#vp"); v.textContent = "";
-  let rows = (D.processes || []).filter(p => p.is_short && (!st.q || [p.cmdline, p.exe, p.image].join(" ").toLowerCase().includes(st.q)));
+  let rows = (D.processes || []).filter(p => p.is_short && (!st.q || [p.cmdline, p.exe, p.image].join(" ").toLowerCase().includes(st.q)) && (!st.onlyAlerts || !["confiavel_microsoft","confiavel_assinado"].includes((p.trust||{}).verdict||"")));
   const cols = [["Hora", p => p.start_ft || 0], ["Duração (ms)", p => p.lifetime_ms ?? 1e12], ["PID", p => p.pid], ["PPID", p => p.ppid], ["Imagem", p => p.image || ""],
-    ["Linha de Comando", p => p.cmdline || ""], ["Teve Janela?", p => p.had_window ? 1 : 0], ["Fontes", null]];
+    ["Confiabilidade", p => (p.trust || {}).label || ""], ["Linha de Comando", p => p.cmdline || ""], ["Teve Janela?", p => p.had_window ? 1 : 0], ["Fontes", null]];
   rows = sortBy(rows, st.sortP);
   if (!rows.length) { v.append(el("div", {class: "empty", text: "Nenhum processo curto registrado."})); return; }
   const tb = el("tbody");
   for (const p of rows) tb.append(el("tr", null, el("td", {text: p.hora}), el("td", {text: fmt(p.lifetime_ms)}), el("td", {text: fmt(p.pid)}),
-    el("td", {text: fmt(p.ppid)}), el("td", {text: p.image || base(p.exe)}), el("td", {class: "cmd", text: p.cmdline || ""}),
+    el("td", {text: fmt(p.ppid)}), el("td", {text: p.image || base(p.exe)}), el("td", null, trustBadge(p.trust)),
+    el("td", {class: "cmd", text: p.cmdline || ""}),
     el("td", {text: p.had_window ? "sim" : "não"}), el("td", {text: (p.sources || []).join(", ")})));
   v.append(el("table", null, header(cols, "sortP"), tb));
 }
@@ -192,6 +204,7 @@ $("#maxr").addEventListener("input", e => { st.max = +e.target.value; $("#maxn")
 $("#maxn").addEventListener("input", e => { st.max = +e.target.value || 0; $("#maxr").value = st.max; render(); });
 document.querySelectorAll("input[name=scope]").forEach(r => r.addEventListener("change", e => { st.scope = e.target.value; render(); }));
 $("#hideNoise").addEventListener("change", e => { st.hideNoise = e.target.checked; render(); });
+$("#onlyAlerts").addEventListener("change", e => { st.onlyAlerts = e.target.checked; render(); });
 $("#metric").addEventListener("change", e => { st.metric = e.target.value; render(); });
 document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
   document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x === t));

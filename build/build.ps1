@@ -20,3 +20,4 @@ if ($Mode -eq "spec") {
 } elseif ($Mode -eq "onefile") {
     & $Py -m PyInstaller --noconfirm --clean --onefile --windowed --uac-admin --name FlashWatch --paths src "src\flashwatch\__main__.py"
 }
+

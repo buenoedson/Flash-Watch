@@ -331,6 +331,14 @@ def correlate(window: dict, registry: ProcessRegistry) -> dict:
     chain, real = resolve_console_chain(window, inst, registry)
     result["console_chain"] = chain
     result["real_command"] = real or (result["cmdline"] if not result["pending"] else "")
+
+    from flashwatch.trust import evaluate_trust
+    result["trust"] = evaluate_trust(
+        exe_path=result["exe"],
+        image=inst.image if inst else basename_lower(result["exe"]),
+        cmdline=result["cmdline"],
+        real_command=result["real_command"],
+    )
     return result
 
 

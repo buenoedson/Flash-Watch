@@ -193,6 +193,7 @@ def build_session(jsonl_path: Path, limite_s: float | None = None, metric: str |
     limit_ms = limite * 1000.0
 
     windowed_keys = set()
+    from flashwatch.trust import evaluate_trust
     for win in windows.values():
         key = (win.get("correlation") or {}).get("instance_key")
         if key:
@@ -203,6 +204,13 @@ def build_session(jsonl_path: Path, limite_s: float | None = None, metric: str |
         win["is_fast"] = classify_fast(win, limite, metric)
         corr = win.get("correlation") or {}
         win["exe"] = corr.get("exe") or (win.get("native_proc") or {}).get("exe", "")
+        if not corr.get("trust"):
+            corr["trust"] = evaluate_trust(
+                exe_path=win["exe"],
+                cmdline=corr.get("cmdline"),
+                real_command=corr.get("real_command"),
+            )
+            win["correlation"] = corr
         win["noise"] = bool(win["flags"].get("noise_class") or win["flags"].get("cloaked")
                             or win["flags"].get("tool_window"))
 
@@ -213,6 +221,7 @@ def build_session(jsonl_path: Path, limite_s: float | None = None, metric: str |
         lt = p.get("lifetime_ms")
         p["is_short"] = bool(p["created_in_session"] and (
             (lt is not None and lt < limit_ms) or not p["had_window"]))
+        p["trust"] = evaluate_trust(exe_path=p.get("exe"), image=p.get("image"), cmdline=p.get("cmdline"))
         proc_list.append(p)
     proc_list.sort(key=lambda p: p.get("start_ft") or 0)
 
@@ -262,7 +271,9 @@ def _csv_safe(value) -> str:
 WINDOW_COLUMNS = [
     ("wid", "wid"), ("hora", "Hora"), ("first_visible_ms", "Visível (ms)"), ("visible_total_ms", "Visível Total (ms)"),
     ("lifetime_ms", "Vida Total (ms)"), ("process_lifetime_ms", "Vida Processo (ms)"), ("ended", "Fim"),
-    ("is_fast", "Rápida"), ("exe", "Executável"), ("pid", "PID"), ("real_command", "Comando / Processo Real"),
+    ("is_fast", "Rápida"), ("exe", "Executável"), ("pid", "PID"), ("trust_label", "Confiabilidade"),
+    ("trust_signer", "Signatário"), ("trust_sha256", "SHA-256"), ("trust_reasons", "Motivos Confiabilidade"),
+    ("real_command", "Comando / Processo Real"),
     ("cmdline", "Linha de Comando"), ("parent_pid", "PID Pai"), ("parent_image", "Processo Pai"),
     ("parent_cmdline", "Comando do Pai"), ("title", "Título da Janela"), ("title_history", "Histórico de Títulos"),
     ("class_name", "Classe"), ("noise", "Ruído"), ("shot_status", "Print"), ("shot_path", "Arquivo do Print"),
@@ -271,7 +282,8 @@ WINDOW_COLUMNS = [
 ]
 PROCESS_COLUMNS = [
     ("instance_key", "instance_key"), ("hora", "Hora"), ("lifetime_ms", "Duração (ms)"), ("pid", "PID"),
-    ("ppid", "PPID"), ("image", "Imagem"), ("exe", "Executável"), ("cmdline", "Linha de Comando"),
+    ("ppid", "PPID"), ("image", "Imagem"), ("exe", "Executável"), ("trust_label", "Confiabilidade"),
+    ("trust_signer", "Signatário"), ("cmdline", "Linha de Comando"),
     ("user_sid", "Usuário/SID"), ("exit_code", "Código de Saída"), ("had_window", "Teve Janela?"),
     ("is_short", "Processo Curto"), ("created_in_session", "Criado na Sessão"), ("sources", "Fontes"),
 ]
@@ -281,8 +293,11 @@ def _window_row(win: dict) -> dict:
     corr = win.get("correlation") or {}
     shot = win.get("shot") or {}
     chain = corr.get("console_chain") or []
+    trust = corr.get("trust") or {}
     return {
         **win,
+        "trust_label": trust.get("label", ""), "trust_signer": trust.get("signer", ""),
+        "trust_sha256": trust.get("sha256", ""), "trust_reasons": " | ".join(trust.get("reasons") or []),
         "real_command": corr.get("real_command", ""), "cmdline": corr.get("cmdline", ""),
         "parent_pid": corr.get("parent_pid"), "parent_image": corr.get("parent_image", ""),
         "parent_cmdline": corr.get("parent_cmdline", ""), "method": corr.get("method", ""),
@@ -291,6 +306,15 @@ def _window_row(win: dict) -> dict:
         "shot_status": shot.get("status", ""), "shot_path": shot.get("path", ""),
         "shot_latency_ms": shot.get("latency_ms"),
         "console_chain": " > ".join(f"{c.get('role')}:{c.get('image')}({c.get('pid')})" for c in chain),
+    }
+
+
+def _process_row_csv(p: dict) -> dict:
+    trust = p.get("trust") or {}
+    return {
+        **p,
+        "trust_label": trust.get("label", ""),
+        "trust_signer": trust.get("signer", ""),
     }
 
 
@@ -318,7 +342,7 @@ def export_session(session_dir: Path, limite_s: float | None = None, metric: str
     with open(json_path, "w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False, indent=1, default=str)
     write_csv(session_dir / WINDOWS_CSV, WINDOW_COLUMNS, [_window_row(x) for x in data["windows"]])
-    write_csv(session_dir / PROCESSES_CSV, PROCESS_COLUMNS, data["processes"])
+    write_csv(session_dir / PROCESSES_CSV, PROCESS_COLUMNS, [_process_row_csv(p) for p in data["processes"]])
     html_path = write_report(session_dir, data)
     return {"json": json_path, "windows_csv": session_dir / WINDOWS_CSV,
             "processes_csv": session_dir / PROCESSES_CSV, "html": html_path, "data": data}

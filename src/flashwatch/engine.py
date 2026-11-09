@@ -28,10 +28,11 @@ S4_DURATIONS_MS = (10, 50, 200, 1000)
 
 
 def self_command() -> list[str]:
-    """Comando para relançar o próprio FlashWatch (python -m flashwatch | executável congelado)."""
+    """Comando para relançar o próprio FlashWatch (python | executável congelado)."""
     if getattr(sys, "frozen", False):
         return [sys.executable]
-    return [sys.executable, "-m", "flashwatch"]
+    main_py = Path(__file__).resolve().parent / "__main__.py"
+    return [sys.executable, str(main_py)]
 
 
 class Engine:
@@ -466,6 +467,8 @@ class Engine:
         if win is not None:
             win["title"] = ev.get("new_title", "")
             win["title_history"].append(win["title"])
+            if self.capture is not None:
+                self.capture.refresh_if_visible(ev["wid"])
             self._ui("window_update", self._ui_row(win))
 
     def _finalize_shot(self, win: dict, first_visible_ms: float | None) -> None:
@@ -486,7 +489,7 @@ class Engine:
     def _set_correlation(self, win: dict, corr: dict, final: bool) -> bool:
         old = win.get("correlation") or {}
         comparable = ("instance_key", "cmdline", "real_command", "parent_pid", "parent_cmdline", "method",
-                      "console_chain", "pending")
+                      "console_chain", "pending", "trust")
         if old and all(old.get(k) == corr.get(k) for k in comparable):
             return False
         win["correlation"] = corr
@@ -647,6 +650,7 @@ class Engine:
     def _ui_row(self, win: dict) -> dict:
         corr = win.get("correlation") or {}
         flags = win.get("flags") or {}
+        trust = corr.get("trust") or {}
         return {
             "wid": win["wid"], "t_ft": win.get("t_ft"), "hora": w.filetime_to_local_str(win.get("t_ft")),
             "first_visible_ms": win.get("first_visible_ms"), "visible_total_ms": win.get("visible_total_ms"),
@@ -654,6 +658,7 @@ class Engine:
             "exe": corr.get("exe") or (win.get("native_proc") or {}).get("exe", ""),
             "real_command": corr.get("real_command") or corr.get("cmdline", ""),
             "parent": corr.get("parent_image", ""), "title": win.get("title", ""),
+            "trust": trust, "trust_label": trust.get("label", ""),
             "shot": dict(win.get("shot") or {}),
             "noise": bool(flags.get("noise_class") or flags.get("cloaked") or flags.get("tool_window")),
             "detail": {k: v for k, v in win.items()},
@@ -661,9 +666,11 @@ class Engine:
         }
 
     def _proc_row(self, inst, keys: set | None = None) -> dict:
+        from flashwatch.trust import evaluate_trust
         d = inst.to_dict()
         d["hora"] = w.filetime_to_local_str(inst.start_ft)
         d["had_window"] = self._had_window(inst.key, keys)
+        d["trust"] = evaluate_trust(exe_path=inst.exe, image=inst.image, cmdline=inst.cmdline)
         return d
 
     # ------------------------------------------------------------------ autoteste S4
