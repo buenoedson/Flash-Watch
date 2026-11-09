@@ -1,0 +1,61 @@
+# --- Segredos / credenciais ---
+.env*
+*.pem
+*.key
+*.pfx
+secrets.*
+credentials.*
+
+# --- Dados / dumps ---
+*.sql
+*.sqlite
+*.db
+*.bak
+*.dump
+*.csv
+*.xlsx
+*.xls
+*.parquet
+output/**/*.pdf
+export/**/*.pdf
+data/**/*.pdf
+
+# --- Logs (exceto histórico de sessão) ---
+*.log
+!logs/HISTORICO_SESSAO.md
+
+# --- FlashWatch runtime (contém linhas de comando, SIDs, usuários e prints de tela) ---
+*.etl
+*.jsonl
+captures/
+runs/
+output/
+export/
+data/
+sessoes/
+shots/
+report*.html
+relatorio.html
+eventos.json
+janelas.csv
+processos.csv
+kernel.xml
+partial_*.xml
+benchmark_result*.md
+tests/harness/results/
+# Fixtures de teste: permitir apenas versões sanitizadas explicitamente
+!tests/fixtures/
+!tests/fixtures/*.sanitized.xml
+!tests/fixtures/*.sanitized.csv
+
+# --- Python / build ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+build/*
+!build/flashwatch.spec
+!build/build.ps1
+dist/
+

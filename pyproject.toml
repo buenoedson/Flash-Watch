@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flashwatch"
+version = "1.1.0"
+description = "Detector de janelas efêmeras (flash de console) para Windows 11"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "psutil>=5.9",
+    "mss>=9.0",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pyinstaller>=6.0"]
+
+[project.scripts]
+flashwatch = "flashwatch.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+    "win: requer Windows com desktop interativo (hooks/captura reais)",
+    "winadmin: requer Windows executando como Administrador (ETW NT Kernel Logger)",
+]
+
